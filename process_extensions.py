@@ -15,7 +15,7 @@ from collections import defaultdict
 import os
 from pathlib import Path
 import re
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Optional, Dict, Any
 
 def parse_date(date_str):
     """Parse date in MM/DD/YYYY format"""
@@ -40,27 +40,54 @@ def get_day_name(date):
     """Get day of week name"""
     return date.strftime('%A')
 
-def process_extension_data(data_lines: Iterable[str]) -> Tuple[List[dict], List[dict]]:
+def detect_delimiter(lines: List[str]) -> str:
+    """Attempt to detect whether the payload is comma- or tab-delimited."""
+
+    if not lines:
+        return ','
+
+    sample = '\n'.join(lines[:10])
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=',\t')
+        return dialect.delimiter
+    except csv.Error:
+        first_line = lines[0]
+        if first_line.count(',') >= first_line.count('\t'):
+            return ','
+        return '\t'
+
+
+def process_extension_data(
+    data_lines: Iterable[str],
+) -> Tuple[List[dict], List[dict], Optional[Dict[str, Any]]]:
     """Process MS Forms extension request data.
 
-    Returns a tuple of successfully parsed records and error dictionaries. Each
-    error dictionary contains a ``message`` and optional metadata such as
-    ``row`` or ``line``.
+    Returns a tuple of successfully parsed records, error dictionaries, and
+    metadata needed for producing processed copies.
     """
 
     records: List[dict] = []
     errors: List[dict] = []
 
-    if not data_lines:
-        return [], errors
-    
-    # Parse header
-    header = data_lines[0].split('\t')
-    
+    lines = list(data_lines)
+
+    if not lines:
+        return [], errors, None
+
+    delimiter = detect_delimiter(lines)
+    reader = csv.reader(lines, delimiter=delimiter)
+
+    try:
+        raw_header = next(reader)
+    except StopIteration:
+        return [], [{'message': 'No header row found', 'row': None}], None
+
+    header = [col.strip() for col in raw_header]
+
     # Map column names to indices
     col_map = {}
     for i, col in enumerate(header):
-        col_map[col.strip()] = i
+        col_map[col] = i
     
     # Required columns (exact names from MS Forms export)
     email_col = 'Email'
@@ -79,21 +106,39 @@ def process_extension_data(data_lines: Iterable[str]) -> Tuple[List[dict], List[
                 'row': None,
             }
         )
-        return [], errors
+        return [], errors, None
     
+    table_data = {
+        'header': raw_header,
+        'rows': [],
+        'col_map': col_map,
+        'delimiter': delimiter,
+    }
+
+    done_col = col_map.get('DONE?')
+
     # Process data rows
-    for row_num, line in enumerate(data_lines[1:], start=2):
-        if not line.strip():  # Skip empty lines
+    for row_num, fields in enumerate(reader, start=2):
+        if not any(field.strip() for field in fields):
             continue
-            
-        fields = line.split('\t')
-        
+
+        if len(fields) < len(raw_header):
+            fields.extend([''] * (len(raw_header) - len(fields)))
+
+        table_data['rows'].append({'row_num': row_num, 'fields': fields[:]})
+
+        already_done = False
+        if done_col is not None and done_col < len(fields):
+            already_done = fields[done_col].strip() == '*'
+        if already_done:
+            continue
+
         try:
             email = fields[col_map[email_col]].strip() if col_map[email_col] < len(fields) else ''
             name = fields[col_map[name_col]].strip() if col_map[name_col] < len(fields) else ''
             assignment = fields[col_map[assignment_col]].strip() if col_map[assignment_col] < len(fields) else ''
             requested_date_str = fields[col_map[date_col]].strip() if col_map[date_col] < len(fields) else ''
-            
+
             # Validate required fields
             missing = []
             if not email:
@@ -104,13 +149,13 @@ def process_extension_data(data_lines: Iterable[str]) -> Tuple[List[dict], List[
                 missing.append('Assignment')
             if not requested_date_str:
                 missing.append('RequestedDate')
-            
+
             if missing:
                 errors.append(
                     {
                         'message': f"Missing fields ({', '.join(missing)})",
                         'row': row_num,
-                        'line': line,
+                        'line': '\t'.join(fields),
                     }
                 )
                 continue
@@ -122,11 +167,11 @@ def process_extension_data(data_lines: Iterable[str]) -> Tuple[List[dict], List[
                     {
                         'message': f"Invalid date format '{requested_date_str}' (expected MM/DD/YYYY)",
                         'row': row_num,
-                        'line': line,
+                        'line': '\t'.join(fields),
                     }
                 )
                 continue
-            
+
             records.append({
                 'email': email,
                 'name': name,
@@ -134,12 +179,12 @@ def process_extension_data(data_lines: Iterable[str]) -> Tuple[List[dict], List[
                 'requested_date': requested_date,
                 'row_num': row_num
             })
-        
+
         except Exception as e:
-            errors.append({'message': str(e), 'row': row_num, 'line': line})
+            errors.append({'message': str(e), 'row': row_num, 'line': '\t'.join(fields)})
             continue
 
-    return records, errors
+    return records, errors, table_data
 
 def deduplicate_records(records):
     """Keep only the latest date for each (Assignment, Email) combination"""
@@ -230,6 +275,40 @@ def create_output_files(records, output_dir='./extensions_output'):
         })
     
     return file_info, io_errors
+
+
+def write_processed_copy(input_path: Optional[str], table_data: Optional[Dict[str, Any]], processed_rows: Iterable[int]):
+    """Write a copy of the original input marking processed rows with a ``*``."""
+
+    if not input_path or not table_data:
+        return None, 'No input file or parsed table data available'
+
+    done_col = table_data['col_map'].get('DONE?') if table_data.get('col_map') else None
+    if done_col is None:
+        return None, "Input file does not include a 'DONE?' column"
+
+    processed_path = Path(input_path)
+    output_path = processed_path.with_name(f"{processed_path.stem}_PROCESSED{processed_path.suffix}")
+
+    delimiter = table_data.get('delimiter', ',')
+    processed_set = set(processed_rows)
+
+    try:
+        with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f, delimiter=delimiter)
+            writer.writerow(table_data['header'])
+
+            for row in table_data['rows']:
+                fields = row['fields'][:]
+                if row['row_num'] in processed_set:
+                    if done_col >= len(fields):
+                        fields.extend([''] * (done_col - len(fields) + 1))
+                    fields[done_col] = '*'
+                writer.writerow(fields)
+    except OSError as exc:
+        return None, str(exc)
+
+    return str(output_path), None
 
 def generate_summary(records, file_info, errors, output_dir, io_errors=None, failures_path=None):
     """Generate summary report"""
@@ -413,14 +492,17 @@ def main(argv=None):
     
     # Process
     print("\nProcessing...")
-    records, errors = process_extension_data(lines)
-    
-    if not records:
+    records, errors, table_data = process_extension_data(lines)
+
+    if not records and errors:
         print("\nFailed to parse data:")
         for error in errors:
             print(f"  • {error}")
         return
-    
+
+    if not records and not errors:
+        print("\nNo new extension requests to process (all rows already marked DONE?).")
+
     print(f"✓ Parsed {len(records)} records")
     
     # Deduplicate
@@ -446,6 +528,20 @@ def main(argv=None):
     output_dir = args.output_dir
     file_info, io_errors = create_output_files(records, output_dir)
     print(f"✓ Created {len(file_info)} CSV files")
+
+    processed_copy_path = None
+    processed_copy_error = None
+    if args.input_file and table_data:
+        processed_rows = {record['row_num'] for record in records}
+        processed_copy_path, processed_copy_error = write_processed_copy(
+            args.input_file,
+            table_data,
+            processed_rows,
+        )
+        if processed_copy_path:
+            print(f"✓ Wrote processed input copy to {processed_copy_path}")
+        elif processed_copy_error:
+            print(f"⚠️ Unable to write processed input copy: {processed_copy_error}")
 
     failures_path = write_failure_report(errors, output_dir)
     if failures_path:

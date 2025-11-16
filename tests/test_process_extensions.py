@@ -1,3 +1,4 @@
+import csv
 import textwrap
 
 import pytest
@@ -9,6 +10,7 @@ from process_extensions import (
     parse_date,
     process_extension_data,
     sanitize_filename,
+    write_processed_copy,
 )
 
 
@@ -56,7 +58,7 @@ def test_process_extension_data_collects_errors_for_missing_columns():
         """Email\tName\tWhich assignment due date do you want to change?\n"""
     ).strip().split('\n')
 
-    records, errors = process_extension_data(data)
+    records, errors, _ = process_extension_data(data)
     assert records == []
     assert errors and 'Missing required columns' in errors[0]['message']
 
@@ -70,10 +72,56 @@ def test_process_extension_data_collects_row_level_errors():
         """
     ).strip().split('\n')
 
-    records, errors = process_extension_data(data)
+    records, errors, _ = process_extension_data(data)
     assert len(records) == 0
     assert len(errors) == 2
     assert all(error.get('row') for error in errors)
+
+
+def test_process_extension_data_handles_csv_and_done_column(tmp_path):
+    csv_data = textwrap.dedent(
+        """
+        Email,Name,Which assignment due date do you want to change?,What would you like to new date to be change too?,DONE?
+        a@example.com,Alice,HW1,01/30/2024,
+        b@example.com,Bob,HW1,02/05/2024,*
+        """
+    ).strip().split('\n')
+
+    records, errors, table = process_extension_data(csv_data)
+
+    assert not errors
+    assert len(records) == 1
+    assert records[0]['email'] == 'a@example.com'
+    assert table
+    assert len(table['rows']) == 2
+
+
+def test_write_processed_copy_marks_processed_rows(tmp_path):
+    source = tmp_path / 'input.csv'
+    source.write_text(
+        textwrap.dedent(
+            """
+            Email,Name,Which assignment due date do you want to change?,What would you like to new date to be change too?,DONE?
+            a@example.com,Alice,HW1,01/30/2024,
+            b@example.com,Bob,HW1,02/05/2024,
+            """
+        ).lstrip()
+    )
+
+    lines = source.read_text().splitlines()
+    records, errors, table = process_extension_data(lines)
+    assert not errors
+
+    processed_rows = {record['row_num'] for record in records[:1]}
+    output_path, error = write_processed_copy(str(source), table, processed_rows)
+    assert error is None
+
+    with open(output_path, newline='', encoding='utf-8-sig') as f:
+        reader = list(csv.reader(f))
+
+    assert reader[0][-1] == 'DONE?'
+    assert reader[1][-1] == '*'
+    assert reader[2][-1] == ''
 
 
 @pytest.mark.parametrize(
