@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""
-MS Forms Extension Request Processor
-Processes student extension requests, deduplicates, adjusts to Sunday, and creates per-assignment CSV files.
+"""MS Forms Extension Request Processor.
+
+Provides a small CLI utility that parses tab-delimited MS Forms exports,
+deduplicates submissions, snaps due dates to Sundays, and writes per-assignment
+CSVs plus a human-readable summary.
 """
 
+from __future__ import annotations
+
+import argparse
 import csv
 from datetime import datetime, timedelta
 from collections import defaultdict
 import os
 from pathlib import Path
 import re
-import sys
+from typing import Iterable, List, Tuple
 
 def parse_date(date_str):
     """Parse date in MM/DD/YYYY format"""
@@ -35,12 +40,17 @@ def get_day_name(date):
     """Get day of week name"""
     return date.strftime('%A')
 
-def process_extension_data(data_lines):
-    """Process MS Forms extension request data"""
-    
-    records = []
-    errors = []
-    
+def process_extension_data(data_lines: Iterable[str]) -> Tuple[List[dict], List[dict]]:
+    """Process MS Forms extension request data.
+
+    Returns a tuple of successfully parsed records and error dictionaries. Each
+    error dictionary contains a ``message`` and optional metadata such as
+    ``row`` or ``line``.
+    """
+
+    records: List[dict] = []
+    errors: List[dict] = []
+
     if not data_lines:
         return [], errors
     
@@ -63,7 +73,12 @@ def process_extension_data(data_lines):
     # Validate we have required columns
     missing_cols = [col for col in required_cols if col not in col_map]
     if missing_cols:
-        errors.append(f"ERROR: Missing required columns: {', '.join(missing_cols)}")
+        errors.append(
+            {
+                'message': f"Missing required columns: {', '.join(missing_cols)}",
+                'row': None,
+            }
+        )
         return [], errors
     
     # Process data rows
@@ -91,13 +106,25 @@ def process_extension_data(data_lines):
                 missing.append('RequestedDate')
             
             if missing:
-                errors.append(f"Row {row_num}: Missing fields ({', '.join(missing)})")
+                errors.append(
+                    {
+                        'message': f"Missing fields ({', '.join(missing)})",
+                        'row': row_num,
+                        'line': line,
+                    }
+                )
                 continue
-            
+
             # Parse date
             requested_date = parse_date(requested_date_str)
             if not requested_date:
-                errors.append(f"Row {row_num}: Invalid date format '{requested_date_str}' (expected MM/DD/YYYY)")
+                errors.append(
+                    {
+                        'message': f"Invalid date format '{requested_date_str}' (expected MM/DD/YYYY)",
+                        'row': row_num,
+                        'line': line,
+                    }
+                )
                 continue
             
             records.append({
@@ -109,9 +136,9 @@ def process_extension_data(data_lines):
             })
         
         except Exception as e:
-            errors.append(f"Row {row_num}: {str(e)}")
+            errors.append({'message': str(e), 'row': row_num, 'line': line})
             continue
-    
+
     return records, errors
 
 def deduplicate_records(records):
@@ -146,10 +173,18 @@ def sanitize_filename(text):
     return filename
 
 def create_output_files(records, output_dir='./extensions_output'):
-    """Create CSV files per assignment"""
-    
-    # Create output directory
-    Path(output_dir).mkdir(exist_ok=True)
+    """Create CSV files per assignment.
+
+    Returns a tuple of ``file_info`` data and any I/O errors encountered.
+    """
+
+    io_errors: List[str] = []
+
+    try:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        io_errors.append(f"Unable to create output directory '{output_dir}': {exc}")
+        return [], io_errors
     
     # Group by assignment
     by_assignment = defaultdict(list)
@@ -168,17 +203,21 @@ def create_output_files(records, output_dir='./extensions_output'):
         assignment_records.sort(key=lambda x: x['email'])
         
         # Write CSV with BOM (UTF-8-sig)
-        with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Email', 'Name', 'Assignment', 'DueDate'])
-            
-            for record in assignment_records:
-                writer.writerow([
-                    record['email'],
-                    record['name'],
-                    record['assignment'],
-                    format_date(record['due_date'])
-                ])
+        try:
+            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Email', 'Name', 'Assignment', 'DueDate'])
+
+                for record in assignment_records:
+                    writer.writerow([
+                        record['email'],
+                        record['name'],
+                        record['assignment'],
+                        format_date(record['due_date'])
+                    ])
+        except OSError as exc:
+            io_errors.append(f"Failed to write '{filepath}': {exc}")
+            continue
         
         # Collect info for summary
         dates = [record['due_date'] for record in assignment_records]
@@ -190,9 +229,9 @@ def create_output_files(records, output_dir='./extensions_output'):
             'latest_date': format_date(max(dates))
         })
     
-    return file_info
+    return file_info, io_errors
 
-def generate_summary(records, file_info, errors, output_dir):
+def generate_summary(records, file_info, errors, output_dir, io_errors=None, failures_path=None):
     """Generate summary report"""
     
     summary_lines = []
@@ -202,22 +241,36 @@ def generate_summary(records, file_info, errors, output_dir):
     summary_lines.append(f"\nTotal Assignments: {len(file_info)}")
     summary_lines.append(f"Total Students: {len(records)}")
     summary_lines.append(f"\nOutput Directory: {os.path.abspath(output_dir)}")
-    summary_lines.append("\n" + "-"*70)
-    summary_lines.append("PER-ASSIGNMENT BREAKDOWN")
-    summary_lines.append("-"*70)
-    
-    for info in file_info:
-        summary_lines.append(f"\n{info['assignment']}")
-        summary_lines.append(f"  File: {info['filename']}")
-        summary_lines.append(f"  Students: {info['num_students']}")
-        summary_lines.append(f"  Date Range: {info['earliest_date']} to {info['latest_date']}")
-    
+    if file_info:
+        summary_lines.append("\n" + "-"*70)
+        summary_lines.append("PER-ASSIGNMENT BREAKDOWN")
+        summary_lines.append("-"*70)
+
+        for info in file_info:
+            summary_lines.append(f"\n{info['assignment']}")
+            summary_lines.append(f"  File: {info['filename']}")
+            summary_lines.append(f"  Students: {info['num_students']}")
+            summary_lines.append(f"  Date Range: {info['earliest_date']} to {info['latest_date']}")
+
+    if failures_path:
+        summary_lines.append("\n" + "-"*70)
+        summary_lines.append("Rejected rows written to:")
+        summary_lines.append(f"  {failures_path}")
+
+    if io_errors:
+        summary_lines.append("\n" + "-"*70)
+        summary_lines.append("FILE I/O ISSUES")
+        summary_lines.append("-"*70)
+        for issue in io_errors:
+            summary_lines.append(f"  • {issue}")
+
     if errors:
         summary_lines.append("\n" + "-"*70)
-        summary_lines.append(f"ERRORS ({len(errors)} found)")
+        summary_lines.append(f"PARSING ERRORS ({len(errors)} found)")
         summary_lines.append("-"*70)
         for error in errors:
-            summary_lines.append(f"  • {error}")
+            row_info = f"Row {error['row']}: " if error.get('row') else ''
+            summary_lines.append(f"  • {row_info}{error['message']}")
     else:
         summary_lines.append("\n" + "-"*70)
         summary_lines.append("✓ No errors detected")
@@ -231,10 +284,33 @@ def generate_summary(records, file_info, errors, output_dir):
     
     # Save summary to file
     summary_file = os.path.join(output_dir, 'SUMMARY.txt')
-    with open(summary_file, 'w') as f:
+    with open(summary_file, 'w', encoding='utf-8') as f:
         f.write(summary_text)
-    
+
     print(f"\nSummary saved to: {summary_file}")
+
+
+def write_failure_report(errors, output_dir):
+    """Write rejected rows (if any) to a CSV file."""
+
+    if not errors:
+        return None
+
+    failures_path = os.path.join(output_dir, 'failures.csv')
+    try:
+        with open(failures_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Row', 'Message', 'Line'])
+            for error in errors:
+                writer.writerow([
+                    error.get('row') or '',
+                    error['message'],
+                    error.get('line', ''),
+                ])
+        return failures_path
+    except OSError as exc:
+        print(f"Unable to write failure report: {exc}")
+        return None
 
 def read_from_file(filename):
     """Read data from a file"""
@@ -272,29 +348,62 @@ def read_from_stdin():
     
     return lines
 
-def main():
+
+def parse_arguments(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--input-file',
+        help='Path to a tab-delimited MS Forms export to process.',
+    )
+    parser.add_argument(
+        '--clipboard',
+        action='store_true',
+        help='Read the data from the clipboard (requires pyperclip).',
+    )
+    parser.add_argument(
+        '--output-dir',
+        default='./extensions_output',
+        help='Directory where CSVs and summary should be written.',
+    )
+    parser.add_argument(
+        '--no-adjust',
+        action='store_true',
+        help='Skip moving requested dates to the following Sunday.',
+    )
+    return parser.parse_args(argv)
+
+def main(argv=None):
+    args = parse_arguments(argv)
+
     print("="*70)
     print("MS Forms Extension Request Processor")
     print("="*70)
-    
-    # Input method selection
-    print("\nHow would you like to provide data?")
-    print("1. Paste directly (type/paste into terminal)")
-    print("2. Read from file")
-    
-    choice = input("\nSelect option (1 or 2): ").strip()
-    
+
     lines = None
-    
-    if choice == '1':
-        lines = read_from_stdin()
-    elif choice == '2':
-        filename = input("\nEnter filename (e.g., extension_requests.txt): ").strip()
-        lines = read_from_file(filename)
+
+    if args.input_file:
+        lines = read_from_file(args.input_file)
+    elif args.clipboard:
+        lines = read_from_clipboard()
+        if lines is None:
+            print("Clipboard support is unavailable (pyperclip not installed).")
     else:
-        print("Invalid option")
-        return
-    
+        # Fallback to the interactive workflow when no arguments are supplied.
+        print("\nHow would you like to provide data?")
+        print("1. Paste directly (type/paste into terminal)")
+        print("2. Read from file")
+
+        choice = input("\nSelect option (1 or 2): ").strip()
+
+        if choice == '1':
+            lines = read_from_stdin()
+        elif choice == '2':
+            filename = input("\nEnter filename (e.g., extension_requests.txt): ").strip()
+            lines = read_from_file(filename)
+        else:
+            print("Invalid option")
+            return
+
     if not lines or not any(line.strip() for line in lines):
         print("No data provided")
         return
@@ -323,17 +432,34 @@ def main():
         print(f"✓ No duplicates found")
     
     # Adjust dates
-    records = adjust_dates(records)
-    adjusted_count = sum(1 for r in records if r['original_date'] != r['due_date'])
-    print(f"✓ Adjusted {adjusted_count} dates to Sunday")
-    
+    if not args.no_adjust:
+        records = adjust_dates(records)
+        adjusted_count = sum(1 for r in records if r['original_date'] != r['due_date'])
+        print(f"✓ Adjusted {adjusted_count} dates to Sunday")
+    else:
+        for record in records:
+            record['due_date'] = record['requested_date']
+            record['original_date'] = record['requested_date']
+        print("✓ Skipped Sunday adjustment (--no-adjust)")
+
     # Create output files
-    output_dir = './extensions_output'
-    file_info = create_output_files(records, output_dir)
+    output_dir = args.output_dir
+    file_info, io_errors = create_output_files(records, output_dir)
     print(f"✓ Created {len(file_info)} CSV files")
-    
+
+    failures_path = write_failure_report(errors, output_dir)
+    if failures_path:
+        print(f"✓ Wrote rejected rows to {failures_path}")
+
     # Summary
-    generate_summary(records, file_info, errors, output_dir)
+    generate_summary(
+        records,
+        file_info,
+        errors,
+        output_dir,
+        io_errors=io_errors,
+        failures_path=failures_path,
+    )
 
 if __name__ == '__main__':
     main()
