@@ -250,15 +250,18 @@ def create_output_files(records, output_dir='./extensions_output'):
         # Write CSV with BOM (UTF-8-sig)
         try:
             with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Email', 'Name', 'Assignment', 'DueDate'])
+                writer = csv.writer(f, lineterminator='\n')
+                writer.writerow(['Email', 'Name', 'Assignment', 'DueDate', 'RECORD'])
 
                 for record in assignment_records:
+                    due_date_str = format_date(record['due_date'])
+                    record_str = f"{record['email']} - {record['name']} - {record['assignment']} - {due_date_str}"
                     writer.writerow([
                         record['email'],
                         record['name'],
                         record['assignment'],
-                        format_date(record['due_date'])
+                        due_date_str,
+                        record_str,
                     ])
         except OSError as exc:
             io_errors.append(f"Failed to write '{filepath}': {exc}")
@@ -295,7 +298,7 @@ def write_processed_copy(input_path: Optional[str], table_data: Optional[Dict[st
 
     try:
         with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f, delimiter=delimiter)
+            writer = csv.writer(f, delimiter=delimiter, lineterminator='\n')
             writer.writerow(table_data['header'])
 
             for row in table_data['rows']:
@@ -378,7 +381,7 @@ def write_failure_report(errors, output_dir):
     failures_path = os.path.join(output_dir, 'failures.csv')
     try:
         with open(failures_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, lineterminator='\n')
             writer.writerow(['Row', 'Message', 'Line'])
             for error in errors:
                 writer.writerow([

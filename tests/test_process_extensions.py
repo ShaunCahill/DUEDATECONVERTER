@@ -5,6 +5,7 @@ import pytest
 
 from process_extensions import (
     adjust_dates,
+    create_output_files,
     deduplicate_records,
     get_next_sunday,
     parse_date,
@@ -133,3 +134,30 @@ def test_write_processed_copy_marks_processed_rows(tmp_path):
 )
 def test_sanitize_filename(raw, expected):
     assert sanitize_filename(raw) == expected
+
+
+def test_create_output_files_adds_record_column_and_unix_newlines(tmp_path):
+    records = [
+        {
+            'email': '21sf55@queensu.ca',
+            'name': 'Saba Fadaei',
+            'assignment': 'LAB: No-Code',
+            'due_date': parse_date('11/30/2025'),
+        }
+    ]
+
+    file_info, io_errors = create_output_files(records, output_dir=tmp_path)
+
+    assert not io_errors
+    assert file_info and file_info[0]['filename'].endswith('_extensions.csv')
+
+    output_file = tmp_path / file_info[0]['filename']
+    raw_contents = output_file.read_text(encoding='utf-8-sig')
+
+    assert '\r' not in raw_contents
+
+    with open(output_file, newline='', encoding='utf-8-sig') as f:
+        rows = list(csv.reader(f))
+
+    assert rows[0] == ['Email', 'Name', 'Assignment', 'DueDate', 'RECORD']
+    assert rows[1][-1] == '21sf55@queensu.ca - Saba Fadaei - LAB: No-Code - 11/30/2025'
