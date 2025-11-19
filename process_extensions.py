@@ -12,6 +12,7 @@ import argparse
 import csv
 from datetime import datetime, timedelta
 from collections import defaultdict
+import io
 import os
 from pathlib import Path
 import re
@@ -247,22 +248,26 @@ def create_output_files(records, output_dir='./extensions_output'):
         # Sort by email
         assignment_records.sort(key=lambda x: x['email'])
         
-        # Write CSV with BOM (UTF-8-sig)
+        # Write CSV with BOM (UTF-8-sig) and trim trailing newline
         try:
-            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f, lineterminator='\n')
-                writer.writerow(['Email', 'Name', 'Assignment', 'DueDate', 'RECORD'])
+            buffer = io.StringIO()
+            writer = csv.writer(buffer, lineterminator='\n')
+            writer.writerow(['Email', 'Name', 'Assignment', 'DueDate', 'RECORD'])
 
-                for record in assignment_records:
-                    due_date_str = format_date(record['due_date'])
-                    record_str = f"{record['email']} - {record['name']} - {record['assignment']} - {due_date_str}"
-                    writer.writerow([
-                        record['email'],
-                        record['name'],
-                        record['assignment'],
-                        due_date_str,
-                        record_str,
-                    ])
+            for record in assignment_records:
+                due_date_str = format_date(record['due_date'])
+                record_str = f"{record['email']} - {record['name']} - {record['assignment']} - {due_date_str}"
+                writer.writerow([
+                    record['email'],
+                    record['name'],
+                    record['assignment'],
+                    due_date_str,
+                    record_str,
+                ])
+
+            contents = buffer.getvalue().rstrip('\n')
+            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+                f.write(contents)
         except OSError as exc:
             io_errors.append(f"Failed to write '{filepath}': {exc}")
             continue
@@ -297,17 +302,21 @@ def write_processed_copy(input_path: Optional[str], table_data: Optional[Dict[st
     processed_set = set(processed_rows)
 
     try:
-        with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f, delimiter=delimiter, lineterminator='\n')
-            writer.writerow(table_data['header'])
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, delimiter=delimiter, lineterminator='\n')
+        writer.writerow(table_data['header'])
 
-            for row in table_data['rows']:
-                fields = row['fields'][:]
-                if row['row_num'] in processed_set:
-                    if done_col >= len(fields):
-                        fields.extend([''] * (done_col - len(fields) + 1))
-                    fields[done_col] = '*'
-                writer.writerow(fields)
+        for row in table_data['rows']:
+            fields = row['fields'][:]
+            if row['row_num'] in processed_set:
+                if done_col >= len(fields):
+                    fields.extend([''] * (done_col - len(fields) + 1))
+                fields[done_col] = '*'
+            writer.writerow(fields)
+
+        contents = buffer.getvalue().rstrip('\n')
+        with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+            f.write(contents)
     except OSError as exc:
         return None, str(exc)
 
@@ -380,15 +389,19 @@ def write_failure_report(errors, output_dir):
 
     failures_path = os.path.join(output_dir, 'failures.csv')
     try:
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator='\n')
+        writer.writerow(['Row', 'Message', 'Line'])
+        for error in errors:
+            writer.writerow([
+                error.get('row') or '',
+                error['message'],
+                error.get('line', ''),
+            ])
+
+        contents = buffer.getvalue().rstrip('\n')
         with open(failures_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f, lineterminator='\n')
-            writer.writerow(['Row', 'Message', 'Line'])
-            for error in errors:
-                writer.writerow([
-                    error.get('row') or '',
-                    error['message'],
-                    error.get('line', ''),
-                ])
+            f.write(contents)
         return failures_path
     except OSError as exc:
         print(f"Unable to write failure report: {exc}")
