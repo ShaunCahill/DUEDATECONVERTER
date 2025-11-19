@@ -1,5 +1,6 @@
 import csv
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from process_extensions import (
     parse_date,
     process_extension_data,
     sanitize_filename,
+    write_failure_report,
     write_processed_copy,
 )
 
@@ -124,6 +126,9 @@ def test_write_processed_copy_marks_processed_rows(tmp_path):
     assert reader[1][-1] == '*'
     assert reader[2][-1] == ''
 
+    raw_contents = Path(output_path).read_text(encoding='utf-8-sig')
+    assert not raw_contents.endswith('\n')
+
 
 @pytest.mark.parametrize(
     'raw,expected',
@@ -155,9 +160,22 @@ def test_create_output_files_adds_record_column_and_unix_newlines(tmp_path):
     raw_contents = output_file.read_text(encoding='utf-8-sig')
 
     assert '\r' not in raw_contents
+    assert not raw_contents.endswith('\n')
 
     with open(output_file, newline='', encoding='utf-8-sig') as f:
         rows = list(csv.reader(f))
 
     assert rows[0] == ['Email', 'Name', 'Assignment', 'DueDate', 'RECORD']
     assert rows[1][-1] == '21sf55@queensu.ca - Saba Fadaei - LAB: No-Code - 11/30/2025'
+
+
+def test_write_failure_report_trims_trailing_newline(tmp_path):
+    errors = [
+        {'row': 2, 'message': 'Missing fields', 'line': 'a,b,c'},
+    ]
+
+    failures_path = write_failure_report(errors, str(tmp_path))
+    assert failures_path
+
+    text = Path(failures_path).read_text(encoding='utf-8')
+    assert not text.endswith('\n')
