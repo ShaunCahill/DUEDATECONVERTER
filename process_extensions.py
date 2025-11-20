@@ -409,15 +409,40 @@ def write_failure_report(errors, output_dir):
 
 def read_from_file(filename):
     """Read data from a file"""
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            return [line.rstrip('\n') for line in f.readlines()]
-    except FileNotFoundError:
-        print(f"Error: File '{filename}' not found")
-        return None
-    except Exception as e:
-        print(f"Error reading file: {e}")
-        return None
+
+    candidates = []
+
+    primary = Path(filename).expanduser()
+    candidates.append(primary)
+
+    # If the file was provided as a relative path, also try resolving it
+    # relative to the script's directory. This helps when the CLI is invoked
+    # from another working directory (e.g., via shortcuts).
+    if not primary.is_absolute():
+        candidates.append(Path(__file__).parent / filename)
+
+    tried_paths = []
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in tried_paths:
+            continue
+        tried_paths.append(resolved)
+
+        if resolved.exists():
+            try:
+                with open(resolved, 'r', encoding='utf-8') as f:
+                    return [line.rstrip('\n') for line in f.readlines()]
+            except Exception as e:
+                print(f"Error reading file '{resolved}': {e}")
+                return None
+
+    tried = ', '.join(str(path) for path in tried_paths)
+    print(
+        f"Error: File '{filename}' not found (searched: {tried}). Current working "
+        f"directory: {Path.cwd()}"
+    )
+    return None
 
 def read_from_clipboard():
     """Try to read from clipboard (requires pyperclip)"""
