@@ -2,6 +2,7 @@ import csv
 import textwrap
 from pathlib import Path
 
+import process_extensions
 import pytest
 
 from process_extensions import (
@@ -11,6 +12,7 @@ from process_extensions import (
     get_next_sunday,
     parse_date,
     process_extension_data,
+    read_from_file,
     sanitize_filename,
     write_failure_report,
     write_processed_copy,
@@ -200,3 +202,35 @@ def test_write_failure_report_trims_trailing_newline(tmp_path):
 
     text = Path(failures_path).read_text(encoding='utf-8')
     assert not text.endswith('\n')
+
+
+def test_read_from_file_checks_script_directory(monkeypatch, tmp_path):
+    source_dir = tmp_path / 'source'
+    source_dir.mkdir()
+    data_file = source_dir / 'COMM 394 - Coding Literacy for Managers F2025.csv'
+    data_file.write_text('Email', encoding='utf-8')
+
+    monkeypatch.setattr(
+        process_extensions,
+        '__file__',
+        str(source_dir / 'process_extensions.py'),
+    )
+
+    working_dir = tmp_path / 'working'
+    working_dir.mkdir()
+    monkeypatch.chdir(working_dir)
+
+    lines = read_from_file('COMM 394 - Coding Literacy for Managers F2025.csv')
+
+    assert lines == ['Email']
+
+
+def test_read_from_file_reports_all_attempts(capsys, tmp_path):
+    missing = tmp_path / 'missing.csv'
+
+    result = read_from_file(str(missing))
+
+    assert result is None
+    captured = capsys.readouterr().out
+    assert str(missing.resolve()) in captured
+    assert str(Path.cwd()) in captured
