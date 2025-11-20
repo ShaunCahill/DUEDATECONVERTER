@@ -99,6 +99,27 @@ def test_process_extension_data_handles_csv_and_done_column(tmp_path):
     assert len(table['rows']) == 2
 
 
+def test_process_extension_data_handles_bom_and_spaced_filename(tmp_path):
+    target = tmp_path / 'COMM 495 - Project Management F2025.csv'
+    target.write_text(
+        textwrap.dedent(
+            """
+            \ufeffEmail,Name,Which assignment due date do you want to change?,What would you like to new date to be change too?
+            a@example.com,Alice,HW1,01/30/2024
+            """
+        ).lstrip(),
+        encoding='utf-8-sig',
+    )
+
+    lines = target.read_text(encoding='utf-8').splitlines()
+
+    records, errors, _ = process_extension_data(lines)
+
+    assert not errors
+    assert len(records) == 1
+    assert records[0]['email'] == 'a@example.com'
+
+
 def test_write_processed_copy_marks_processed_rows(tmp_path):
     source = tmp_path / 'input.csv'
     source.write_text(

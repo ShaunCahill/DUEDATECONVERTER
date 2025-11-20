@@ -83,7 +83,7 @@ def process_extension_data(
     except StopIteration:
         return [], [{'message': 'No header row found', 'row': None}], None
 
-    header = [col.strip() for col in raw_header]
+    header = [col.strip().lstrip('\ufeff') for col in raw_header]
 
     # Map column names to indices
     col_map = {}
