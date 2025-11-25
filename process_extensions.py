@@ -69,6 +69,7 @@ def process_extension_data(
 
     records: List[dict] = []
     errors: List[dict] = []
+    all_assignments: set = set()
 
     lines = list(data_lines)
 
@@ -114,6 +115,7 @@ def process_extension_data(
         'rows': [],
         'col_map': col_map,
         'delimiter': delimiter,
+        'all_assignments': None,
     }
 
     done_col = col_map.get('DONE?')
@@ -127,6 +129,10 @@ def process_extension_data(
             fields.extend([''] * (len(raw_header) - len(fields)))
 
         table_data['rows'].append({'row_num': row_num, 'fields': fields[:]})
+
+        assignment = fields[col_map[assignment_col]].strip() if col_map[assignment_col] < len(fields) else ''
+        if assignment:
+            all_assignments.add(assignment)
 
         already_done = False
         if done_col is not None and done_col < len(fields):
@@ -185,6 +191,7 @@ def process_extension_data(
             errors.append({'message': str(e), 'row': row_num, 'line': '\t'.join(fields)})
             continue
 
+    table_data['all_assignments'] = sorted(all_assignments)
     return records, errors, table_data
 
 def deduplicate_records(records):
@@ -218,7 +225,7 @@ def sanitize_filename(text):
     filename = filename.strip('_')
     return filename
 
-def create_output_files(records, output_dir='./extensions_output'):
+def create_output_files(records, output_dir='./extensions_output', all_assignments=None):
     """Create CSV files per assignment.
 
     Returns a tuple of ``file_info`` data and any I/O errors encountered.
@@ -236,6 +243,11 @@ def create_output_files(records, output_dir='./extensions_output'):
     by_assignment = defaultdict(list)
     for record in records:
         by_assignment[record['assignment']].append(record)
+
+    if all_assignments:
+        for assignment in all_assignments:
+            if assignment not in by_assignment:
+                by_assignment[assignment] = []
     
     file_info = []
     
@@ -273,14 +285,23 @@ def create_output_files(records, output_dir='./extensions_output'):
             continue
         
         # Collect info for summary
-        dates = [record['due_date'] for record in assignment_records]
-        file_info.append({
-            'assignment': assignment,
-            'filename': filename,
-            'num_students': len(assignment_records),
-            'earliest_date': format_date(min(dates)),
-            'latest_date': format_date(max(dates))
-        })
+        if assignment_records:
+            dates = [record['due_date'] for record in assignment_records]
+            file_info.append({
+                'assignment': assignment,
+                'filename': filename,
+                'num_students': len(assignment_records),
+                'earliest_date': format_date(min(dates)),
+                'latest_date': format_date(max(dates))
+            })
+        else:
+            file_info.append({
+                'assignment': assignment,
+                'filename': filename,
+                'num_students': 0,
+                'earliest_date': 'N/A',
+                'latest_date': 'N/A'
+            })
     
     return file_info, io_errors
 
@@ -341,7 +362,10 @@ def generate_summary(records, file_info, errors, output_dir, io_errors=None, fai
             summary_lines.append(f"\n{info['assignment']}")
             summary_lines.append(f"  File: {info['filename']}")
             summary_lines.append(f"  Students: {info['num_students']}")
-            summary_lines.append(f"  Date Range: {info['earliest_date']} to {info['latest_date']}")
+            if info['num_students'] > 0:
+                summary_lines.append(f"  Date Range: {info['earliest_date']} to {info['latest_date']}")
+            else:
+                summary_lines.append(f"  Date Range: N/A (no extensions)")
 
     if failures_path:
         summary_lines.append("\n" + "-"*70)
@@ -567,7 +591,8 @@ def main(argv=None):
 
     # Create output files
     output_dir = args.output_dir
-    file_info, io_errors = create_output_files(records, output_dir)
+    all_assignments = table_data.get('all_assignments') if table_data else None
+    file_info, io_errors = create_output_files(records, output_dir, all_assignments=all_assignments)
     print(f"✓ Created {len(file_info)} CSV files")
 
     processed_copy_path = None
