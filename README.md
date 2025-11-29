@@ -40,6 +40,9 @@ The main entry point is `process_extensions.py`. You can provide data in three w
 | `--clipboard` | Read the export from the system clipboard. |
 | `--output-dir DIR` | Directory where CSVs, `SUMMARY.txt`, and `failures.csv` are written. Defaults to `./extensions_output`. |
 | `--no-adjust` | Skip snapping requested dates to the following Sunday. |
+| `--dry-run` | Preview what would be done without writing any files. |
+| `--verbose`, `-v` | Enable verbose output for debugging. |
+| `--quiet`, `-q` | Suppress non-essential output. |
 
 ### Input expectations
 
@@ -70,6 +73,46 @@ A `SUMMARY.txt` file is also produced. It contains:
 Rejected rows (missing data, invalid dates, etc.) are written to
 `failures.csv` when applicable.
 
+### Exit Codes
+
+The script returns appropriate exit codes for automation:
+
+* `0` - Success
+* `1` - Error (missing file, invalid data, I/O errors, etc.)
+
+## API Usage
+
+The module exposes a clean public API via `__all__` for programmatic use:
+
+```python
+from process_extensions import (
+    # Data classes
+    ExtensionRecord,
+    ParseError,
+    TableData,
+    ColumnConfig,
+
+    # Core functions
+    parse_date,
+    process_extension_data,
+    deduplicate_records,
+    adjust_dates,
+
+    # Output functions
+    create_output_files,
+    generate_summary,
+)
+
+# Process data with custom column names
+custom_cols = ColumnConfig(
+    email="StudentEmail",
+    name="StudentName",
+    assignment="Assignment",
+    date="DueDate",
+)
+records, errors, table = process_extension_data(lines, columns=custom_cols)
+```
+
 ## Testing
 
 Run the automated tests with:
@@ -77,3 +120,12 @@ Run the automated tests with:
 ```bash
 pytest
 ```
+
+The test suite includes 35+ tests covering:
+* Date parsing and adjustment
+* Record deduplication
+* CSV/TSV format detection
+* BOM (byte order mark) handling
+* Dry-run mode
+* CLI argument handling
+* Error collection and reporting
